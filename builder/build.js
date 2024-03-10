@@ -81,12 +81,23 @@ async function main() {
         publishLog(`stderr: ${chunk}`);
     });
 
-    process.on('close', () => {
+    process.on('close', (code) => {
+        console.log("Build complete");
+        
+        if (code !== 0) {
+            publishLog(`error: build exited with code ${code}`);
+            producer.disconnect();
+            return;
+        }
+
         publishLog("Build complete");
         deploy().catch((error) => {
             publishLog(error.toString());
             publishLog("deployment failed");
-        });
+        })
+        .finally(() => {
+            producer.disconnect();
+        })
     });
 }
 
