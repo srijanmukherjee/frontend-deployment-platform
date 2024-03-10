@@ -1,16 +1,17 @@
 const { exec } = require('child_process');
 const path = require('path');
 const fs = require('fs/promises');
-const { createReadStream } = require('fs');
+const { createReadStream, readFileSync } = require('fs');
 const mime = require('mime-types');
 const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 const { fromContainerMetadata } = require('@aws-sdk/credential-providers');
-const Redis = require('ioredis');
+const { Kafka } = require('kafkajs');
 
 const SOURCE_PATH = process.env.SOURCE_PATH;
 const DEPLOYMENT_DIRECTORY = process.env.S3_DEPLOYMENT_DIRECTORY;
 const PROJECT_ID = process.env.PROJECT_ID;
-const REDIS_LOG_CHANNEL = `logs:${PROJECT_ID}`
+const DEPLOYMENT_ID = process.env.DEPLOYMENT_ID;
+const KAFKA_TOPIC = process.env.KAFKA_LOG_TOPIC;
 
 const s3Client = new S3Client({
     // https://docs.aws.amazon.com/AmazonECS/latest/bestpracticesguide/security-iam-roles.html
@@ -19,15 +20,39 @@ const s3Client = new S3Client({
     region: process.env.AWS_REGION
 });
 
-// REDIS_URI must be provided through environment variable during launch
-const producer = new Redis(process.env.REDIS_URI);
+const kafka = new Kafka({
+    clientId: `docker-build-server-${DEPLOYMENT_ID}`,
+    brokers: [process.env.KAFKA_BROKER],
+    ssl: {
+        ca: [readFileSync(path.join(__dirname, 'kafka.pem'), 'utf-8')]
+    },
+    sasl: {
+        username: process.env.KAFKA_SASL_USERNAME,
+        password: process.env.KAFKA_SASL_PASSWORD,
+        mechanism: 'plain'
+    }
+});
 
-function publishLog(log) {
-    producer.publish(REDIS_LOG_CHANNEL, JSON.stringify({ log }))
+const producer = kafka.producer();
+
+async function publishLog(log) {
+    await producer.send({
+        topic: KAFKA_TOPIC,
+        messages: [
+            {
+                key: 'log',
+                value: JSON.stringify({
+                    deploymentId: DEPLOYMENT_ID,
+                    projectId: PROJECT_ID,
+                    log
+                })
+            }
+        ]
+    });
 }
 
 async function deploy() {
-    publishLog("deploying...");
+    await publishLog("deploying...");
     const buildPath = path.join(SOURCE_PATH, process.env.BUILD_DIRECTORY);
     const contents = await fs.readdir(buildPath, { withFileTypes: true, recursive: true });
     const abortController = new AbortController();
@@ -46,7 +71,7 @@ async function deploy() {
             ContentType: mime.lookup(content.name)
         });
 
-        publishLog(`uploading ${filePath}`);
+        await publishLog(`uploading ${filePath}`);
 
         return s3Client.send(command, {abortSignal: abortController.signal});
     });
@@ -59,45 +84,44 @@ async function deploy() {
         throw error;
     }
 
-    publishLog("deployment complete");
+    await publishLog("deployment complete");
 }
 
 async function main() {
-    publishLog("starting build");
+    await producer.connect();
+
+    await publishLog("starting build");
     console.log(`source path: ${SOURCE_PATH}`);
 
-    const process = exec(`cd ${SOURCE_PATH} && npm install && npm run build`);
+    const buildProcess = exec(`cd ${SOURCE_PATH} && npm install && npm run build`);
 
-    process.stdout.on('data', (chunk) => {
-        publishLog(chunk);
+    buildProcess.stdout.on('data', async (chunk) => {
+        await publishLog(chunk);
     });
 
     // https://nodejs.org/api/stream.html#event-error_1
-    process.stdout.on('error', (err) => {
-        publishLog(`error: something went wrong while processing stdout: ${err.message}`);
+    buildProcess.stdout.on('error', async (err) => {
+        await publishLog(`error: something went wrong while processing stdout: ${err.message}`);
     });
 
-    process.stderr.on('data', (chunk) => {
-        publishLog(`stderr: ${chunk}`);
+    buildProcess.stderr.on('data', async (chunk) => {
+        await publishLog(`stderr: ${chunk}`);
     });
 
-    process.on('close', (code) => {
-        console.log("Build complete");
-        
-        if (code !== 0) {
-            publishLog(`error: build exited with code ${code}`);
-            producer.disconnect();
-            return;
+    buildProcess.on('close', async (code) => {
+        if (code === 0) {
+            console.log("Build complete");
+            await publishLog("Build complete");
+            await deploy().catch(async (error) => {
+                await publishLog(error.toString());
+                await publishLog("deployment failed");
+                exit(1);
+            })
+        } else {
+            await publishLog(`error: build exited with code ${code}`);
         }
-
-        publishLog("Build complete");
-        deploy().catch((error) => {
-            publishLog(error.toString());
-            publishLog("deployment failed");
-        })
-        .finally(() => {
-            producer.disconnect();
-        })
+        
+        process.exit(code);
     });
 }
 

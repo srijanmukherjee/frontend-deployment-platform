@@ -8,6 +8,7 @@ COPY package.json package.json
 COPY yarn.lock yarn.lock
 RUN yarn install
 
+COPY kafka.pem kafka.pem
 COPY main.sh main.sh
 COPY build.js build.js
 

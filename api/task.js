@@ -1,14 +1,15 @@
 const {RunTaskCommandInput} = require('@aws-sdk/client-ecs');
 
 /**
- * creates a ne deployment task configuration
+ * creates a new deployment task configuration
  * 
  * @param {string} gitRepositoryUrl 
  * @param {string} projectId
+ * @param {string} deploymentId
  * 
  * @returns {RunTaskCommandInput}
  */
-function createNewDeploymentConfiguration(gitRepositoryUrl, projectId) {
+function createNewDeploymentConfiguration(gitRepositoryUrl, projectId, deploymentId) {
     return {
         cluster: process.env.AWS_DEPLOYMENT_CLUSTER_ARN,
         taskDefinition: process.env.AWS_DEPLOYMENT_TASK_DEFINITION_ARN,
@@ -35,8 +36,24 @@ function createNewDeploymentConfiguration(gitRepositoryUrl, projectId) {
                             value: projectId
                         },
                         {
-                            name: 'REDIS_URI',
-                            value: process.env.REDIS_URI
+                            name: "DEPLOYMENT_ID",
+                            value: deploymentId
+                        },
+                        {
+                            name: 'KAFKA_BROKER',
+                            value: process.env.KAFKA_BROKER
+                        },
+                        {
+                            name: 'KAFKA_SASL_USERNAME',
+                            value: process.env.KAFKA_SASL_USERNAME
+                        },
+                        {
+                            name: 'KAFKA_SASL_PASSWORD',
+                            value: process.env.KAFKA_SASL_PASSWORD
+                        },
+                        {
+                            name: 'KAFKA_LOG_TOPIC',
+                            value: process.env.KAFKA_LOG_TOPIC
                         }
                     ]
                 }
